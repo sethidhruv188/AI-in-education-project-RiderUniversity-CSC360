@@ -1,8 +1,9 @@
 import os
+import textwrap
 import json
+import fitz  # PyMuPDF (Still needed to extract text for RAG search)
 import faiss
 import pickle
-import fitz  # PyMuPDF
 import google.generativeai as genai
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
@@ -11,12 +12,28 @@ from dotenv import load_dotenv
 load_dotenv()
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 
+# *** CHANGE THIS TO SWITCH ASSIGNMENTS ***
+TARGET_ASSIGNMENT = "Module_5_Discussion"
+
+# Paths
+BASE_DIR = os.path.join("assignments", TARGET_ASSIGNMENT)
+SUBMISSIONS_DIR = os.path.join(BASE_DIR, "submissions")
+RUBRIC_FILE = os.path.join(BASE_DIR, "rubric.txt")
+SOLUTION_FILE = os.path.join(BASE_DIR, "solution.pdf")
+
 if not GOOGLE_API_KEY:
     print("❌ Error: GOOGLE_API_KEY not found in .env file")
     exit()
 
 genai.configure(api_key=GOOGLE_API_KEY)
-llm = genai.GenerativeModel('gemini-2.5-flash')
+llm = genai.GenerativeModel(
+    model_name='gemini-2.5-flash',
+    safety_settings=[
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}
+    ],
+generation_config={"temperature": 0.4}
+)
 
 # Load Knowledge Base
 try:
@@ -26,151 +43,146 @@ try:
     embedder = SentenceTransformer('all-MiniLM-L6-v2')
     print("✅ Knowledge Base Loaded.")
 except:
-    print("⚠️ Knowledge Base not found. Please run 'process_documents.py' first.")
+    print("⚠️ Knowledge Base not found. Run 'process_documents.py' first.")
     index = None
 
 
-# --- 2. SMART FILE READER ---
-def read_submission(file_path):
+# --- 2. HELPER: Text Extractor (For RAG Query ONLY) ---
+def extract_text_for_search(file_path):
     """
-    Reads the file based on extension.
-    IF .txt -> Reads text
-    ELSE IF .pdf -> Extracts text
+    We still need to read text to search the slides (RAG).
+    If the file is an image-pdf, we return None and will use the Rubric as the search query.
     """
-    if not os.path.exists(file_path):
-        return None
-
-    # Logic: If TXT, do this...
-    if file_path.lower().endswith('.txt'):
-        try:
+    try:
+        if file_path.lower().endswith('.txt'):
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read()
-        except:
-            return None
-
-    # Logic: Else if PDF, do this...
-    elif file_path.lower().endswith('.pdf'):
-        try:
+        elif file_path.lower().endswith('.pdf'):
             doc = fitz.open(file_path)
-            text = ""
-            for page in doc:
-                text += page.get_text() + "\n"
-            return text
-        except:
-            return None
-
-    else:
-        return "Error: Unsupported file format."
+            text = "".join([page.get_text() for page in doc])
+            return text.strip() if text.strip() else None
+    except:
+        return None
 
 
-# --- 3. RAG SEARCH (Finds Slides) ---
+# --- 3. RAG SEARCH ---
 def find_relevant_slides(query, k=3):
-    if index is None: return ""
+    if index is None or not query: return ""
     query_vec = embedder.encode([query]).astype('float32')
     _, indices = index.search(query_vec, k)
     return "\n\n".join([text_metadata[i]['content'] for i in indices[0]])
 
 
-# --- 4. THE PROMPT LOGIC ---
-def build_grading_prompt(student_text, rubric, solution, slides):
+# --- 4. VISION UPLOADER (The Image Feature) ---
+def upload_to_gemini(path, mime_type="application/pdf"):
+    """Uploads file to Google so the AI can SEE tables/screenshots."""
+    if not os.path.exists(path):
+        print(f"❌ File not found: {path}")
+        return None
+    return genai.upload_file(path, mime_type=mime_type)
+
+
+# --- 5. GRADING PROMPT ---
+# --- 5. GRADING PROMPT ---
+# --- 6. PROMPT ---
+def build_grading_instruction(rubric_text, slides_text):
     return f"""
-    You are an AI Teaching Assistant. Grade this student submission.
+    You are an expert AI Teaching Assistant. 
+    **TASK:** Visually compare the Student Submission to the Instructor Solution.
 
-    **SOURCES OF TRUTH:**
-    1. <Rubric>: How to assign points.
-    2. <Instructor Solution>: The factual correct answers.
-    3. <Lecture Slides>: Context for definitions.
-
-    **TASK:**
-    - Compare <Student Submission> to <Instructor Solution>.
-    - If the student contradicts the Solution Key (e.g., wrong calculation), deduct points.
-    - If the definition is slightly different but matches the concept in <Lecture Slides>, give credit.
-
-    **INPUT DATA:**
+    **HANDWRITING PROTOCOL (CRITICAL):**
+    - Students may submit handwritten tables or code.
+    - If a handwritten number is ambiguous (e.g., a '0' looks like a '6' or '1'), look for **context clues** in the surrounding text to confirm.
+    - **Benefit of the Doubt:** If the student's written logic is correct but one digit in the final string looks slightly off due to handwriting quality (e.g., '101101' vs '110101'), assume it is a handwriting artifact and **DO NOT deduct points** unless it is clearly a calculation error.
+    - Cross-reference the "Length" they calculated with the string they wrote. If they match the solution, the string is likely correct.
 
     <Rubric>
-    {rubric}
+    {rubric_text}
     </Rubric>
 
-    <Instructor Solution>
-    {solution}
-    </Instructor Solution>
+    <Slides Context>
+    {slides_text}
+    </Slides Context>
 
-    <Lecture Slides Context>
-    {slides}
-    </Lecture Slides Context>
+    **OUTPUT INSTRUCTIONS:**
+    - Use keys "Q1", "Q2", "Q3".
+    - "points" must be "X/Y".
 
-    <Student Submission>
-    {student_text}
-    </Student Submission>
-
-    **OUTPUT FORMAT (JSON ONLY):**
+    **OUTPUT (JSON ONLY):**
     {{
-        "student_name": "extracted name",
-        "score": "X/Total",
-        "feedback_summary": "Overall comment...",
+        "score": "X/10",
+        "feedback_summary": "Summary...",
         "detailed_grading": [
             {{ "question": "Q1", "points": "X/Y", "reason": "..." }},
-            {{ "question": "Q2", "points": "X/Y", "reason": "..." }}
+            {{ "question": "Q2", "points": "X/Y", "reason": "..." }},
+            {{ "question": "Q3", "points": "X/Y", "reason": "..." }}
         ]
     }}
     """
+# --- 6. MAIN PROCESSOR ---
+def process_assignment_folder():
+    print(f"\n📂 TARGET ASSIGNMENT: {TARGET_ASSIGNMENT}")
 
-
-# --- 5. MAIN GRADER FUNCTION ---
-def grade_assignment(submission_path, rubric_path, solution_path):
-    print(f"\n📝 Grading: {submission_path}")
-
-    # Read all files
-    student_text = read_submission(submission_path)
-    rubric_text = read_submission(rubric_path)
-    solution_text = read_submission(solution_path)
-
-    if not student_text:
-        print("❌ Error reading submission file.")
+    if not os.path.exists(RUBRIC_FILE) or not os.path.exists(SOLUTION_FILE):
+        print(f"❌ Missing Rubric or Solution in: {BASE_DIR}")
         return
 
-    # Get relevant slides (Context)
-    # We use the first 500 chars of student text to find relevant topics
-    relevant_slides = find_relevant_slides(student_text[:500])
+    # 1. Read Rubric & Upload Solution (Vision)
+    with open(RUBRIC_FILE, 'r', encoding='utf-8') as f:
+        rubric_text = f.read()
+    solution_file_obj = upload_to_gemini(SOLUTION_FILE)
 
-    # Build Prompt & Call AI
-    prompt = build_grading_prompt(student_text, rubric_text, solution_text, relevant_slides)
+    # 2. Grade Submissions
+    for filename in os.listdir(SUBMISSIONS_DIR):
+        if not (filename.endswith(".pdf") or filename.endswith(".txt")): continue
 
-    try:
-        response = llm.generate_content(prompt)
-        # Clean JSON
-        clean_json = response.text.replace("```json", "").replace("```", "").strip()
-        result = json.loads(clean_json)
+        submission_path = os.path.join(SUBMISSIONS_DIR, filename)
+        print(f"\n📝 Processing: {filename}")
 
-        # Print Beautiful Output
-        print("-" * 40)
-        print(f"Student: {result.get('student_name', 'Unknown')}")
-        print(f"Score:   {result.get('score', 'N/A')}")
-        print("-" * 40)
-        for item in result.get('detailed_grading', []):
-            print(f"• {item['question']}: {item['points']}")
-            print(f"  Reason: {item['reason']}")
-        print("-" * 40)
+        # A. RAG Search (Hybrid Strategy)
+        # Try to search using student text. If student file is image-only, search using Rubric text.
+        search_query = extract_text_for_search(submission_path) or rubric_text
+        slides_context = find_relevant_slides(search_query[:500])
 
-    except Exception as e:
-        print(f"❌ Grading Failed: {e}")
-        print("Raw Output:", response.text)
+        # B. Visual Upload (The Upgrade)
+        student_file_obj = upload_to_gemini(submission_path)
+        if not student_file_obj: continue
+
+        # C. Call AI (Multimodal)
+        try:
+            prompt = build_grading_instruction(rubric_text, slides_context)
+            response = llm.generate_content([
+                prompt,
+                "--- INSTRUCTOR SOLUTION ---", solution_file_obj,
+                "--- STUDENT SUBMISSION ---", student_file_obj
+            ])
+
+            result = json.loads(response.text.replace("```json", "").replace("```", "").strip())
+
+            # --- IMPROVED PRINTING WITH TEXT WRAP ---
+            wrapper = textwrap.TextWrapper(width=80, subsequent_indent="     ")
+
+            print("-" * 60)
+            print(f"✅ Result: {result.get('student_name', 'Unknown')} | Score: {result.get('score', 'N/A')}")
+
+            # Wrap the Main Summary
+            summary = result.get('feedback_summary', 'No summary provided.')
+            print("\n📝 Summary:")
+            print(textwrap.fill(summary, width=80))
+            print("")  # Empty line for spacing
+
+            # Wrap the Detailed Reasons
+            for item in result.get('detailed_grading', []):
+                q_text = f"• {item.get('question')}: {item.get('points')}"
+                reason_text = f"  Reason: {item.get('reason')}"
+
+                print(q_text)
+                print(wrapper.fill(reason_text))
+                print("")  # Empty line between questions
+            print("-" * 60)
+        except Exception as e:
+            print(f"❌ Failed: {e}")
 
 
-# --- 6. RUN THE TEST ---
-if __name__ == "__main__":
-    # Define your files
-    RUBRIC_FILE = "rubric.txt"
-    SOLUTION_FILE = "submissions_to_grade/CSC350-Module 5 Discussion Board Solution.pdf"
-
-    # 1. Test a TXT file
-    print("\n--- Test 1: PDF Submission ---")
-    grade_assignment("submissions_to_grade/Tanmay_Submission_1.pdf", RUBRIC_FILE, SOLUTION_FILE)
-
-    # 2. Test a PDF file (Make sure you have one!)
-    print("\n--- Test 2: PDF Submission ---")
-    grade_assignment("submissions_to_grade/Dhruv_Submission_2.pdf", RUBRIC_FILE, SOLUTION_FILE)
-
-    print("\n--- Test 3: PDF Submission ---")
-    grade_assignment("submissions_to_grade/Nik_Submission_3.pdf", RUBRIC_FILE, SOLUTION_FILE)
+# EXECUTE DIRECTLY
+process_assignment_folder()
