@@ -156,7 +156,7 @@ OUTPUT: Return ONLY valid JSON. No markdown, no preamble.
 """
 
 
-# --- CORE FUNCTIONS called by app.py ---
+# --- CORE FUNCTIONS called by app.py --
 
 def grade_submission(
     course_id: str,

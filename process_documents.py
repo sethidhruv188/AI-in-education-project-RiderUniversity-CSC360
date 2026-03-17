@@ -65,7 +65,7 @@ def build_knowledge_base(course_id: str, materials_dir: str = None):
         materials_dir: path to folder containing slides/PDFs for this course.
                        Defaults to courses/{course_id}/materials/
     Returns:
-        dict with status and chunk count
+        dict with status and chunk count.
     """
     if materials_dir is None:
         materials_dir = os.path.join("courses", course_id, "materials")

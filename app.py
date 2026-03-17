@@ -129,7 +129,7 @@ def setup_assignment():
     })
 
 
-# =============================================================================
+# ============================================================================
 # ENDPOINT 3: Grade a Single Submission
 #
 # Called when: a student submits on Canvas (via LTI webhook later)
