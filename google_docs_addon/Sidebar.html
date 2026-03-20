@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 16px;
+      font-size: 13px;
+      color: #202124;
+    }
+
+    h3 {
+      margin: 0 0 4px 0;
+      font-size: 15px;
+      color: #1a73e8;
+    }
+
+    .subtitle {
+      color: #5f6368;
+      font-size: 12px;
+      margin-bottom: 16px;
+    }
+
+    .info-box {
+      background: #f8f9fa;
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      font-size: 12px;
+      color: #3c4043;
+    }
+
+    .info-box code {
+      display: block;
+      margin-top: 6px;
+      background: #e8f0fe;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      color: #1a73e8;
+    }
+
+    button {
+      width: 100%;
+      padding: 10px;
+      background: #1a73e8;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+
+    button:hover {
+      background: #1557b0;
+    }
+
+    button:disabled {
+      background: #9aa0a6;
+      cursor: not-allowed;
+    }
+
+    #status {
+      margin-top: 14px;
+      font-size: 12px;
+    }
+
+    .loading {
+      color: #1a73e8;
+    }
+
+    .error {
+      color: #d93025;
+      background: #fce8e6;
+      padding: 8px 10px;
+      border-radius: 6px;
+    }
+
+    .success {
+      color: #137333;
+      background: #e6f4ea;
+      padding: 8px 10px;
+      border-radius: 6px;
+    }
+
+    .result-item {
+      border-left: 3px solid #dadce0;
+      padding: 6px 10px;
+      margin: 8px 0;
+      font-size: 12px;
+    }
+
+    .result-item.good { border-color: #34a853; }
+    .result-item.warn { border-color: #fbbc04; }
+    .result-item.unclear { border-color: #9aa0a6; }
+
+    .result-section {
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+
+    .result-ref {
+      color: #1a73e8;
+      margin-top: 3px;
+      font-size: 11px;
+    }
+
+    .context-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: #5f6368;
+      margin-bottom: 12px;
+      background: #f1f3f4;
+      padding: 6px 10px;
+      border-radius: 4px;
+    }
+
+    .context-row span { font-weight: 600; color: #202124; }
+  </style>
+</head>
+<body>
+
+  <h3>AI Review</h3>
+  <p class="subtitle">Pre-submission feedback based on your course materials.</p>
+
+  <div class="info-box">
+    Your doc must start with:
+    <code>COURSE: CSC130_Spring2026 | ASSIGNMENT: Stack_Discussion</code>
+  </div>
+
+  <div id="context-display" style="display:none" class="context-row">
+    <div>Course: <span id="ctx-course">—</span></div>
+    <div>Assignment: <span id="ctx-assignment">—</span></div>
+  </div>
+
+  <button id="reviewBtn" onclick="startReview()">Get AI Review</button>
+
+  <div id="status"></div>
+
+  <script>
+    // On load, try to read the doc header and show context
+    google.script.run
+      .withSuccessHandler(function(ctx) {
+        if (ctx.hasHeader) {
+          document.getElementById("ctx-course").textContent = ctx.courseId;
+          document.getElementById("ctx-assignment").textContent = ctx.assignmentId;
+          document.getElementById("context-display").style.display = "flex";
+        }
+      })
+      .getDocContext();
+
+    function startReview() {
+      const btn = document.getElementById("reviewBtn");
+      const status = document.getElementById("status");
+
+      btn.disabled = true;
+      btn.textContent = "Reviewing...";
+      status.innerHTML = '<p class="loading">Analyzing your submission against course materials. This may take 15-20 seconds...</p>';
+
+      google.script.run
+        .withSuccessHandler(function(response) {
+          btn.disabled = false;
+          btn.textContent = "Get AI Review";
+
+          if (response.error) {
+            status.innerHTML = '<div class="error">' + response.message + '</div>';
+            return;
+          }
+
+          renderResults(response.result);
+        })
+        .withFailureHandler(function(err) {
+          btn.disabled = false;
+          btn.textContent = "Get AI Review";
+          status.innerHTML = '<div class="error">Something went wrong: ' + err.message + '</div>';
+        })
+        .runAIReview();
+    }
+
+    function renderResults(result) {
+      const status = document.getElementById("status");
+
+      let html = '<div class="success">Review complete — comments added to your doc.</div>';
+
+      if (result.overall_impression) {
+        html += '<p style="margin-top:12px;font-size:12px;color:#3c4043">' + result.overall_impression + '</p>';
+      }
+
+      if (result.items && result.items.length > 0) {
+        result.items.forEach(function(item) {
+          const cls = item.status === "looks good" ? "good" : item.status === "needs review" ? "warn" : "unclear";
+          const emoji = item.status === "looks good" ? "✓" : item.status === "needs review" ? "⚠" : "?";
+
+          html += '<div class="result-item ' + cls + '">';
+          html += '<div class="result-section">' + emoji + ' ' + item.section + '</div>';
+          html += '<div>' + item.comment + '</div>';
+          if (item.reference) {
+            html += '<div class="result-ref">→ ' + item.reference + '</div>';
+          }
+          html += '</div>';
+        });
+      }
+
+      status.innerHTML = html;
+    }
+  </script>
+
+</body>
+</html>
