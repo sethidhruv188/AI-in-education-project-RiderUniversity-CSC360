@@ -81,8 +81,8 @@ Course-specific rules override general knowledge. Example: in CSC 130, `pop()` i
 ### Installation
 
 ```bash
-git clone [https://github.com/your-repo/AI-in-education-project-RiderUniversity](https://github.com/sethidhruv188/AI-in-education-project-RiderUniversity-CSC360)
-cd AI-in-education-project-RiderUniversity
+git clone https://github.com/sethidhruv188/AI-in-education-project-RiderUniversity-CSC360
+cd AI-in-education-project-RiderUniversity-CSC360
 pip install -r requirements.txt
 ```
 
