@@ -18,13 +18,18 @@ from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 
+load_dotenv()
+
+
 from process_documents import build_knowledge_base
 from autograder import grade_submission, get_presubmission_review, grade_all_submissions
 
-load_dotenv()
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max upload
+
+app.register_blueprint(lti_bp)
+
 
 
 # =============================================================================
