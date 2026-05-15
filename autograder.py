@@ -27,7 +27,7 @@ def get_llm(task: str = "grading"):
     task="grading"  -> gemini-2.0-flash (cheaper, fully capable for rubric matching)
     task="review"   -> gemini-2.5-flash (better reasoning for nuanced student feedback)
     """
-    model_name = 'gemini-2.0-flash' if task == "grading" else 'gemini-2.5-flash'
+    model_name = 'gemini-2.5-flash' if task == "grading" else 'gemini-2.5-flash'
     return genai.GenerativeModel(
         model_name=model_name,
         safety_settings=[
