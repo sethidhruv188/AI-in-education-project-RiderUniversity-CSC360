@@ -310,4 +310,5 @@ def teacher_dashboard():
 
 # Run with: python app.py (local dev) or gunicorn app:app --bind 0.0.0.0:8080 (production)
 port = int(os.environ.get("PORT", 5000))
-app.run(debug=os.environ.get("FLASK_ENV") != "production", host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
