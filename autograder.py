@@ -3,6 +3,7 @@ import json
 import fitz
 import google.generativeai as genai
 from dotenv import load_dotenv
+from gcs_helper import download_from_gcs
 
 # process_documents is now our shared KB loader
 from process_documents import load_knowledge_base
@@ -48,6 +49,33 @@ def extract_text_for_search(file_path: str):
     except Exception:
         return None
 
+
+def requires_vision(file_path: str):
+    """
+    Checks if a PDF requires the expensive Vision API by scanning for images
+    or a lack of selectable text (which implies a scanned document).
+    """
+    if not file_path.lower().endswith('.pdf'):
+        return False  # Text files (.txt) never need vision
+
+    try:
+        doc = fitz.open(file_path)
+        text_length = 0
+        image_count = 0
+
+        for page in doc:
+            text_length += len(page.get_text().strip())
+            # get_images() returns a list of images on the page
+            image_count += len(page.get_images(full=True))
+
+        # If it has images, OR if it has almost no text (e.g., a scanned handwritten page)
+        if image_count > 0 or text_length < 100:
+            return True
+
+        return False  # It is a pure text PDF!
+    except Exception as e:
+        print(f"Error scanning {file_path} for vision: {e}")
+        return True  # If PyMuPDF fails, default to safety (Vision)
 
 def find_relevant_slides(query: str, index, text_metadata, embedder, k=3):
     """Query the course-specific FAISS index for relevant slide content."""
@@ -159,57 +187,69 @@ OUTPUT: Return ONLY valid JSON. No markdown, no preamble.
 # --- CORE FUNCTIONS called by app.py --
 
 def grade_submission(
-    course_id: str,
-    assignment_id: str,
-    submission_path: str
+        course_id: str,
+        assignment_id: str,
+        submission_path: str
 ):
     """
-    Grade a single student submission for a given course and assignment.
-
-    Args:
-        course_id: e.g. "CSC130_Spring2026"
-        assignment_id: e.g. "Module_5_Discussion"
-        submission_path: full path to student's PDF or TXT file
-
-    Returns:
-        dict with score, feedback, and grading details
+    Grade a single student submission for a given course and assignment using GCS.
+    (Note: submission_path is already a /tmp path passed from app.py)
     """
-    # Load this course's isolated knowledge base
-    index, text_metadata, embedder = load_knowledge_base(course_id)
+    # Load this course's isolated knowledge base from GCS
+    index, text_metadata, embedder = load_knowledge_base(course_id, assignment_id)
     if index is None:
-        return {"error": f"No knowledge base found for course {course_id}. Run /build-kb first."}
+        return {"error": f"No knowledge base found for {course_id} - {assignment_id}."}
 
-    # Locate rubric and solution for this assignment
-    assignment_dir = os.path.join("courses", course_id, "assignments", assignment_id)
-    rubric_file = os.path.join(assignment_dir, "rubric.txt")
-    solution_file = os.path.join(assignment_dir, "solution.pdf")
+    # Define GCS Cloud Paths
+    gcs_rubric_file = f"courses/{course_id}/assignments/{assignment_id}/rubric.txt"
+    gcs_solution_file = f"courses/{course_id}/assignments/{assignment_id}/solution.pdf"
 
-    if not os.path.exists(rubric_file):
-        return {"error": f"Rubric not found at {rubric_file}"}
-    if not os.path.exists(solution_file):
-        return {"error": f"Solution not found at {solution_file}"}
+    # Define /tmp Local Paths
+    tmp_rubric_file = f"/tmp/{course_id}_{assignment_id}_rubric.txt"
+    tmp_solution_file = f"/tmp/{course_id}_{assignment_id}_solution.pdf"
 
-    with open(rubric_file, 'r', encoding='utf-8') as f:
+    # Download Rubric and Solution from GCS to /tmp
+    if not download_from_gcs(gcs_rubric_file, tmp_rubric_file):
+        return {"error": "Rubric not found in Google Cloud Storage."}
+
+    # We don't error out if solution is missing, some assignments might not have one
+    has_solution = download_from_gcs(gcs_solution_file, tmp_solution_file)
+
+    with open(tmp_rubric_file, 'r', encoding='utf-8') as f:
         rubric_text = f.read()
 
     # RAG: search course slides using student text (or rubric as fallback)
     search_query = extract_text_for_search(submission_path) or rubric_text
     slides_context = find_relevant_slides(search_query[:500], index, text_metadata, embedder)
 
-    # Upload both PDFs for visual grading (Gemini sees tables, screenshots, handwriting)
-    solution_obj = upload_to_gemini(solution_file)
-    submission_obj = upload_to_gemini(submission_path)
+    # === SMART ROUTING: INSTRUCTOR SOLUTION ===
+    solution_content = "No solution provided."
+    if has_solution:
+        if requires_vision(tmp_solution_file):
+            print("Routing Instructor Solution to Expensive Vision Pipeline...")
+            solution_content = upload_to_gemini(tmp_solution_file)
+        else:
+            print("Routing Instructor Solution to Cheap Text Pipeline...")
+            solution_content = extract_text_for_search(tmp_solution_file)
 
-    if not submission_obj:
-        return {"error": "Failed to upload student submission to Gemini"}
+    # === SMART ROUTING: STUDENT SUBMISSION ===
+    if requires_vision(submission_path):
+        print(f"Routing Student Submission to Vision Pipeline...")
+        submission_content = upload_to_gemini(submission_path)
+    else:
+        print(f"Routing Student Submission to Text Pipeline...")
+        submission_content = extract_text_for_search(submission_path)
+
+    if not submission_content:
+        return {"error": "Failed to process student submission"}
 
     llm = get_llm()
     prompt = build_grading_prompt(rubric_text, slides_context)
 
     response = llm.generate_content([
         prompt,
-        "--- INSTRUCTOR SOLUTION ---", solution_obj,
-        "--- STUDENT SUBMISSION ---", submission_obj
+        "--- INSTRUCTOR SOLUTION ---", solution_content,
+        "--- STUDENT SUBMISSION ---", submission_content
     ])
 
     result = json.loads(
@@ -219,37 +259,32 @@ def grade_submission(
     result["assignment_id"] = assignment_id
     result["submission_file"] = os.path.basename(submission_path)
 
+    # Clean up the /tmp files to save server memory
+    os.remove(tmp_rubric_file)
+    if has_solution:
+        os.remove(tmp_solution_file)
+
     return result
 
-
-def get_presubmission_review(
-    course_id: str,
-    assignment_id: str,
-    doc_text: str
-):
-    """
-    Generate pre-submission formative feedback for a student's Google Doc draft.
-
-    Args:
-        course_id: e.g. "CSC130_Spring2026"
-        assignment_id: e.g. "Module_5_Discussion"
-        doc_text: plain text content of the student's Google Doc
-
-    Returns:
-        dict with per-section feedback and slide references
-    """
-    index, text_metadata, embedder = load_knowledge_base(course_id)
+def get_presubmission_review(course_id: str, assignment_id: str, doc_text: str):
+    """Generate pre-submission formative feedback for a Google Doc draft."""
+    index, text_metadata, embedder = load_knowledge_base(course_id, assignment_id)
     if index is None:
         return {"error": f"No knowledge base found for course {course_id}"}
 
-    assignment_dir = os.path.join("courses", course_id, "assignments", assignment_id)
-    rubric_file = os.path.join(assignment_dir, "rubric.txt")
+    # Define paths
+    gcs_rubric_file = f"courses/{course_id}/assignments/{assignment_id}/rubric.txt"
+    tmp_rubric_file = f"/tmp/{course_id}_{assignment_id}_review_rubric.txt"
 
-    if not os.path.exists(rubric_file):
-        return {"error": f"Rubric not found at {rubric_file}"}
+    # Download Rubric from GCS
+    if not download_from_gcs(gcs_rubric_file, tmp_rubric_file):
+        return {"error": "Rubric not found in Google Cloud Storage."}
 
-    with open(rubric_file, 'r', encoding='utf-8') as f:
+    with open(tmp_rubric_file, 'r', encoding='utf-8') as f:
         rubric_text = f.read()
+
+    # Clean up /tmp
+    os.remove(tmp_rubric_file)
 
     slides_context = find_relevant_slides(doc_text[:500], index, text_metadata, embedder)
 
@@ -265,7 +300,6 @@ def get_presubmission_review(
     result["assignment_id"] = assignment_id
 
     return result
-
 
 def grade_all_submissions(course_id: str, assignment_id: str):
     """

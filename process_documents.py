@@ -5,6 +5,7 @@ import pickle
 import faiss
 import numpy as np
 from dotenv import load_dotenv
+from gcs_helper import download_from_gcs, upload_to_gcs
 import google.generativeai as genai
 from sentence_transformers import SentenceTransformer
 
@@ -56,30 +57,13 @@ def read_txt(file_path):
 #
 # This means CSC 130 and CSC 350 never share embeddings — zero cross-contamination.
 
-def build_knowledge_base(course_id: str, materials_dir: str = None):
+def build_knowledge_base(course_id: str, assignment_id: str, materials_dir: str):
     """
-    Build (or rebuild) the FAISS knowledge base for a specific course.
-
-    Args:
-        course_id: unique identifier like "CSC130_Spring2026"
-        materials_dir: path to folder containing slides/PDFs for this course.
-                       Defaults to courses/{course_id}/materials/
-    Returns:
-        dict with status and chunk count.
+    Build (or rebuild) the FAISS knowledge base and upload it to Google Cloud Storage.
     """
-    if materials_dir is None:
-        materials_dir = os.path.join("courses", course_id, "materials")
-
-    # Where we save this course's knowledge base
-    kb_dir = os.path.join("courses", course_id, "knowledge_base")
-    os.makedirs(kb_dir, exist_ok=True)
-
-    index_file = os.path.join(kb_dir, "faiss_index.bin")
-    metadata_file = os.path.join(kb_dir, "text_metadata.pkl")
-
-    if not os.path.exists(materials_dir):
-        os.makedirs(materials_dir, exist_ok=True)
-        return {"status": "error", "message": f"No materials folder found at {materials_dir}"}
+    # Define temporary server paths
+    tmp_index_file = f"/tmp/{course_id}_{assignment_id}_faiss_index.bin"
+    tmp_metadata_file = f"/tmp/{course_id}_{assignment_id}_text_metadata.pkl"
 
     all_texts = []
     text_metadata = []
@@ -96,14 +80,14 @@ def build_knowledge_base(course_id: str, materials_dir: str = None):
                 text = read_txt(file_path)
 
             if text:
-                # Split into meaningful chunks — paragraphs or slide sections
                 chunks = [c for c in text.split('\n\n') if len(c) > 50]
                 for chunk in chunks:
                     all_texts.append(chunk)
                     text_metadata.append({
                         "source": filename,
                         "content": chunk,
-                        "course_id": course_id
+                        "course_id": course_id,
+                        "assignment_id": assignment_id
                     })
                 print(f"Processed {filename} ({len(chunks)} chunks)")
         except Exception as e:
@@ -112,38 +96,60 @@ def build_knowledge_base(course_id: str, materials_dir: str = None):
     if not all_texts:
         return {"status": "error", "message": "No text found in materials folder"}
 
+    # Build FAISS
     embeddings = embedder.encode(all_texts, show_progress_bar=False)
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(np.array(embeddings).astype('float32'))
 
-    faiss.write_index(index, index_file)
-    with open(metadata_file, "wb") as f:
+    # Save to /tmp
+    faiss.write_index(index, tmp_index_file)
+    with open(tmp_metadata_file, "wb") as f:
         pickle.dump(text_metadata, f)
+
+    # UPLOAD THE BRAIN TO GOOGLE CLOUD STORAGE!
+    gcs_kb_dir = f"courses/{course_id}/assignments/{assignment_id}/knowledge_base"
+    upload_to_gcs(tmp_index_file, f"{gcs_kb_dir}/faiss_index.bin")
+    upload_to_gcs(tmp_metadata_file, f"{gcs_kb_dir}/text_metadata.pkl")
+
+    # Clean up server RAM (/tmp)
+    os.remove(tmp_index_file)
+    os.remove(tmp_metadata_file)
+    for filename in os.listdir(materials_dir):
+        os.remove(os.path.join(materials_dir, filename))
+    os.rmdir(materials_dir)
 
     return {
         "status": "success",
         "course_id": course_id,
-        "chunks_indexed": len(all_texts),
-        "index_path": index_file
+        "assignment_id": assignment_id,
+        "chunks_indexed": len(all_texts)
     }
 
-
-def load_knowledge_base(course_id: str):
+def load_knowledge_base(course_id: str, assignment_id: str):
     """
-    Load an existing FAISS index for a course.
-    Returns (index, text_metadata, embedder) or (None, None, None) if not found.
+    Load an existing FAISS index for a SPECIFIC ASSIGNMENT from Google Cloud Storage.
     """
-    kb_dir = os.path.join("courses", course_id, "knowledge_base")
-    index_file = os.path.join(kb_dir, "faiss_index.bin")
-    metadata_file = os.path.join(kb_dir, "text_metadata.pkl")
+    # GCS Paths
+    gcs_kb_dir = f"courses/{course_id}/assignments/{assignment_id}/knowledge_base"
+    gcs_index_file = f"{gcs_kb_dir}/faiss_index.bin"
+    gcs_metadata_file = f"{gcs_kb_dir}/text_metadata.pkl"
 
-    if not os.path.exists(index_file) or not os.path.exists(metadata_file):
+    # Temporary Server Paths
+    tmp_index_file = f"/tmp/{course_id}_{assignment_id}_faiss_index.bin"
+    tmp_metadata_file = f"/tmp/{course_id}_{assignment_id}_text_metadata.pkl"
+
+    # Download the brain from the cloud to the server
+    index_downloaded = download_from_gcs(gcs_index_file, tmp_index_file)
+    metadata_downloaded = download_from_gcs(gcs_metadata_file, tmp_metadata_file)
+
+    if not index_downloaded or not metadata_downloaded:
         return None, None, None
 
-    index = faiss.read_index(index_file)
-    with open(metadata_file, "rb") as f:
+    index = faiss.read_index(tmp_index_file)
+    with open(tmp_metadata_file, "rb") as f:
         text_metadata = pickle.load(f)
+
     embedder = SentenceTransformer('all-MiniLM-L6-v2')
 
     return index, text_metadata, embedder
