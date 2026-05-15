@@ -19,6 +19,24 @@ else:
     print("Warning: No GOOGLE_API_KEY found.")
     model = None
 
+# --- MODULE-LEVEL CACHES ---
+# Embedder: ~90MB model, takes 2-3s to load. Cache it once per container lifetime.
+_embedder = None
+
+# KB cache: avoids re-downloading FAISS index from GCS on every request.
+# Key: "course_id_assignment_id", Value: (index, text_metadata, embedder)
+# For batch grading 30 students, this means 1 GCS download instead of 30.
+_kb_cache = {}
+
+
+def get_embedder():
+    """Return the shared SentenceTransformer instance, loading it only once."""
+    global _embedder
+    if _embedder is None:
+        print("Loading SentenceTransformer embedder (one-time)...")
+        _embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    return _embedder
+
 
 def transcribe_with_gemini(file_path):
     if not model:
@@ -68,7 +86,7 @@ def build_knowledge_base(course_id: str, assignment_id: str, materials_dir: str)
     all_texts = []
     text_metadata = []
 
-    embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    embedder = get_embedder()  # Cached — no reload cost
 
     for filename in os.listdir(materials_dir):
         file_path = os.path.join(materials_dir, filename)
@@ -129,7 +147,15 @@ def build_knowledge_base(course_id: str, assignment_id: str, materials_dir: str)
 def load_knowledge_base(course_id: str, assignment_id: str):
     """
     Load an existing FAISS index for a SPECIFIC ASSIGNMENT from Google Cloud Storage.
+
+    Results are cached in memory (_kb_cache). For batch grading (e.g. 30 students),
+    the index is downloaded from GCS exactly once and reused for every submission.
     """
+    cache_key = f"{course_id}_{assignment_id}"
+    if cache_key in _kb_cache:
+        print(f"KB cache hit for {cache_key} — skipping GCS download")
+        return _kb_cache[cache_key]
+
     # GCS Paths
     gcs_kb_dir = f"courses/{course_id}/assignments/{assignment_id}/knowledge_base"
     gcs_index_file = f"{gcs_kb_dir}/faiss_index.bin"
@@ -150,6 +176,8 @@ def load_knowledge_base(course_id: str, assignment_id: str):
     with open(tmp_metadata_file, "rb") as f:
         text_metadata = pickle.load(f)
 
-    embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    embedder = get_embedder()  # Cached — no reload cost
 
-    return index, text_metadata, embedder
+    result = (index, text_metadata, embedder)
+    _kb_cache[cache_key] = result  # Store for all future requests this session
+    return result

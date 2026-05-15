@@ -17,15 +17,19 @@ if not GOOGLE_API_KEY:
 genai.configure(api_key=GOOGLE_API_KEY)
 
 
-def get_llm():
+def get_llm(task: str = "grading"):
     """
     Returns a configured Gemini model instance.
     Safety filters are relaxed for academic CS content
     (e.g. 'kill process', 'segfault', 'exploit') which would
     otherwise get flagged as harmful content.
+
+    task="grading"  -> gemini-2.0-flash (cheaper, fully capable for rubric matching)
+    task="review"   -> gemini-2.5-flash (better reasoning for nuanced student feedback)
     """
+    model_name = 'gemini-2.0-flash' if task == "grading" else 'gemini-2.5-flash'
     return genai.GenerativeModel(
-        model_name='gemini-2.5-flash',
+        model_name=model_name,
         safety_settings=[
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}
@@ -50,32 +54,103 @@ def extract_text_for_search(file_path: str):
         return None
 
 
-def requires_vision(file_path: str):
+def build_submission_parts(file_path: str):
     """
-    Checks if a PDF requires the expensive Vision API by scanning for images
-    or a lack of selectable text (which implies a scanned document).
+    Page-level smart router. Replaces the old requires_vision() + upload_to_gemini() pair.
+
+    For each page in the PDF:
+      - If the page has extractable text AND no images → free text extraction
+      - If the page is image-only or has embedded images → goes to Vision API
+
+    Only the pages that actually need vision are uploaded, not the whole document.
+    This preserves page order so Gemini always sees content in context
+    (e.g. "see diagram below" on page 2 is followed immediately by the diagram on page 3).
+
+    Returns a list of content parts ready to pass directly to llm.generate_content().
+    For .txt files, returns a plain string in a list.
     """
+    # TXT files: never need vision
     if not file_path.lower().endswith('.pdf'):
-        return False  # Text files (.txt) never need vision
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return [f.read()]
+        except Exception:
+            return []
 
     try:
         doc = fitz.open(file_path)
-        text_length = 0
-        image_count = 0
-
-        for page in doc:
-            text_length += len(page.get_text().strip())
-            # get_images() returns a list of images on the page
-            image_count += len(page.get_images(full=True))
-
-        # If it has images, OR if it has almost no text (e.g., a scanned handwritten page)
-        if image_count > 0 or text_length < 100:
-            return True
-
-        return False  # It is a pure text PDF!
     except Exception as e:
-        print(f"Error scanning {file_path} for vision: {e}")
-        return True  # If PyMuPDF fails, default to safety (Vision)
+        print(f"Failed to open PDF {file_path}: {e}")
+        return []
+
+    text_parts = []       # Accumulated text content from cheap pages
+    vision_page_nums = [] # Pages that need vision
+
+    for page_num, page in enumerate(doc):
+        page_text = page.get_text().strip()
+        has_images = len(page.get_images(full=True)) > 0
+
+        if has_images or len(page_text) < 50:
+            # This page needs vision — mark it
+            vision_page_nums.append(page_num)
+            # Flush any accumulated text before this vision page so order is preserved
+            if text_parts:
+                yield_text = "\n\n".join(text_parts)
+                text_parts = []
+        else:
+            # Pure text page — free
+            text_parts.append(f"[Page {page_num + 1}]\n{page_text}")
+
+    # Flush any remaining text pages
+    parts = []
+    if text_parts and not vision_page_nums:
+        # All pages were text — simple case, no vision needed at all
+        parts.append("\n\n".join(text_parts))
+        return parts
+
+    # Mixed doc: rebuild parts in page order
+    text_buffer = []
+    vision_set = set(vision_page_nums)
+
+    for page_num, page in enumerate(doc):
+        page_text = page.get_text().strip()
+        has_images = len(page.get_images(full=True)) > 0
+
+        if page_num not in vision_set:
+            text_buffer.append(f"[Page {page_num + 1}]\n{page_text}")
+        else:
+            # Flush text buffer before this vision page
+            if text_buffer:
+                parts.append("\n\n".join(text_buffer))
+                text_buffer = []
+            parts.append(f"[Page {page_num + 1} — visual content below]")
+
+    # Flush any trailing text
+    if text_buffer:
+        parts.append("\n\n".join(text_buffer))
+
+    # Now upload ONLY the vision pages as a separate mini-PDF
+    if vision_page_nums:
+        writer = fitz.open()
+        for pg in vision_page_nums:
+            writer.insert_pdf(doc, from_page=pg, to_page=pg)
+        tmp_vision_path = file_path.replace(".pdf", "_vision_pages.pdf")
+        writer.save(tmp_vision_path)
+        uploaded = genai.upload_file(tmp_vision_path, mime_type="application/pdf")
+        parts.append(uploaded)
+        # Clean up the mini-PDF
+        try:
+            os.remove(tmp_vision_path)
+        except Exception:
+            pass
+
+        vision_count = len(vision_page_nums)
+        total_pages = len(doc)
+        print(f"Vision API used for {vision_count}/{total_pages} pages "
+              f"(saved ~{100 - int(vision_count/total_pages*100)}% vision cost)")
+
+    return parts
+
 
 def find_relevant_slides(query: str, index, text_metadata, embedder, k=3):
     """Query the course-specific FAISS index for relevant slide content."""
@@ -84,13 +159,6 @@ def find_relevant_slides(query: str, index, text_metadata, embedder, k=3):
     query_vec = embedder.encode([query]).astype('float32')
     _, indices = index.search(query_vec, k)
     return "\n\n".join([text_metadata[i]['content'] for i in indices[0]])
-
-
-def upload_to_gemini(path: str, mime_type="application/pdf"):
-    """Upload a file to Gemini's file API so it can visually process tables/screenshots."""
-    if not os.path.exists(path):
-        return None
-    return genai.upload_file(path, mime_type=mime_type)
 
 
 def build_grading_prompt(rubric_text: str, slides_context: str):
@@ -102,7 +170,7 @@ def build_grading_prompt(rubric_text: str, slides_context: str):
     by giving benefit of the doubt when surrounding logic is correct.
     """
     return f"""
-You are an expert AI Teaching Assistant grading for a university course.
+You are an expert,fair, and highly capable AI Teaching Assistant grading for a university course. When evaluating student submissions—especially handwritten ones—do not penalize students for messy text extraction, spatial formatting issues, or minor OCR errors. If the student's final answer, conclusion, or core logic matches the provided solution or rubric criteria, assume their underlying methodology is correct unless you find an explicit, undeniable flaw in their written steps. Give the student the benefit of the doubt on formatting.
 
 TASK: Compare the Student Submission against the Instructor Solution.
 Grade strictly according to the Rubric. Use the Course Slides for context
@@ -110,7 +178,7 @@ on course-specific rules (e.g. custom method signatures, data structure constrai
 
 HANDWRITING PROTOCOL:
 - If a handwritten digit is ambiguous, use surrounding context to infer.
-- If the student's logic is correct but one symbol looks off due to handwriting,
+- If the student's logic is correct but some symbols look off due to handwriting,
   do NOT deduct — flag for human review instead.
 
 <Rubric>
@@ -222,35 +290,29 @@ def grade_submission(
     search_query = extract_text_for_search(submission_path) or rubric_text
     slides_context = find_relevant_slides(search_query[:500], index, text_metadata, embedder)
 
-    # === SMART ROUTING: INSTRUCTOR SOLUTION ===
-    solution_content = "No solution provided."
+    # === PAGE-LEVEL ROUTING: INSTRUCTOR SOLUTION ===
+    # build_submission_parts() extracts text from text pages (free) and
+    # only uploads image/blank pages to Vision API (paid). Page order preserved.
+    solution_parts = []
     if has_solution:
-        if requires_vision(tmp_solution_file):
-            print("Routing Instructor Solution to Expensive Vision Pipeline...")
-            solution_content = upload_to_gemini(tmp_solution_file)
-        else:
-            print("Routing Instructor Solution to Cheap Text Pipeline...")
-            solution_content = extract_text_for_search(tmp_solution_file)
+        solution_parts = build_submission_parts(tmp_solution_file)
 
-    # === SMART ROUTING: STUDENT SUBMISSION ===
-    if requires_vision(submission_path):
-        print(f"Routing Student Submission to Vision Pipeline...")
-        submission_content = upload_to_gemini(submission_path)
-    else:
-        print(f"Routing Student Submission to Text Pipeline...")
-        submission_content = extract_text_for_search(submission_path)
+    # === PAGE-LEVEL ROUTING: STUDENT SUBMISSION ===
+    submission_parts = build_submission_parts(submission_path)
 
-    if not submission_content:
+    if not submission_parts:
         return {"error": "Failed to process student submission"}
 
-    llm = get_llm()
+    llm = get_llm(task="grading")  # Uses cheaper gemini-2.0-flash
     prompt = build_grading_prompt(rubric_text, slides_context)
 
-    response = llm.generate_content([
-        prompt,
-        "--- INSTRUCTOR SOLUTION ---", solution_content,
-        "--- STUDENT SUBMISSION ---", submission_content
-    ])
+    # Assemble the full content list: prompt + solution parts + submission parts
+    content = [prompt, "--- INSTRUCTOR SOLUTION ---"]
+    content += solution_parts if solution_parts else ["No solution provided."]
+    content += ["--- STUDENT SUBMISSION ---"]
+    content += submission_parts
+
+    response = llm.generate_content(content)
 
     result = json.loads(
         response.text.replace("```json", "").replace("```", "").strip()
@@ -288,7 +350,7 @@ def get_presubmission_review(course_id: str, assignment_id: str, doc_text: str):
 
     slides_context = find_relevant_slides(doc_text[:500], index, text_metadata, embedder)
 
-    llm = get_llm()
+    llm = get_llm(task="review")  # Uses smarter gemini-2.5-flash for nuanced feedback
     prompt = build_feedback_prompt(doc_text, rubric_text, slides_context)
 
     response = llm.generate_content([prompt])
