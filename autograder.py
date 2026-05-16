@@ -16,6 +16,38 @@ if not GOOGLE_API_KEY:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
+# --- MODULE-LEVEL CACHES ---
+# Rubric and solution are identical for all 30 students on the same assignment.
+# Caching avoids 29 redundant GCS downloads per batch grading run.
+# Key: "course_id_assignment_id"
+_rubric_cache = {}   # stores rubric text strings
+_solution_cache = {} # stores already-processed solution parts lists
+
+# Hard cap: protects against accidental 40-page uploads blowing up vision costs.
+MAX_PAGES = 10
+
+
+def cap_pdf_pages(file_path: str) -> str:
+    """
+    If a PDF exceeds MAX_PAGES, write a trimmed copy to /tmp and return its path.
+    Otherwise return the original path unchanged.
+    """
+    if not file_path.lower().endswith(".pdf"):
+        return file_path
+    try:
+        doc = fitz.open(file_path)
+        if len(doc) <= MAX_PAGES:
+            return file_path
+        writer = fitz.open()
+        writer.insert_pdf(doc, from_page=0, to_page=MAX_PAGES - 1)
+        capped_path = file_path.replace(".pdf", "_capped.pdf")
+        writer.save(capped_path)
+        print(f"WARNING: Submission capped at {MAX_PAGES} pages (original had {len(doc)})")
+        return capped_path
+    except Exception as e:
+        print(f"Page cap failed, using original: {e}")
+        return file_path
+
 
 def get_llm(task: str = "grading"):
     """
@@ -24,10 +56,10 @@ def get_llm(task: str = "grading"):
     (e.g. 'kill process', 'segfault', 'exploit') which would
     otherwise get flagged as harmful content.
 
-    task="grading"  -> gemini-2.0-flash (cheaper, fully capable for rubric matching)
-    task="review"   -> gemini-2.5-flash (better reasoning for nuanced student feedback)
+    task="grading"  -> gemini-2.5-flash (best accuracy for rubric matching)
+    task="review"   -> gemini-2.5-flash (nuanced student feedback)
     """
-    model_name = 'gemini-2.5-flash' if task == "grading" else 'gemini-2.5-flash'
+    model_name = 'gemini-2.5-flash'  # Use 2.5-flash for both — accuracy over marginal cost saving
     return genai.GenerativeModel(
         model_name=model_name,
         safety_settings=[
@@ -268,42 +300,54 @@ def grade_submission(
     if index is None:
         return {"error": f"No knowledge base found for {course_id} - {assignment_id}."}
 
-    # Define GCS Cloud Paths
-    gcs_rubric_file = f"courses/{course_id}/assignments/{assignment_id}/rubric.txt"
-    gcs_solution_file = f"courses/{course_id}/assignments/{assignment_id}/solution.pdf"
+    cache_key = f"{course_id}_{assignment_id}"
 
-    # Define /tmp Local Paths
-    tmp_rubric_file = f"/tmp/{course_id}_{assignment_id}_rubric.txt"
-    tmp_solution_file = f"/tmp/{course_id}_{assignment_id}_solution.pdf"
+    # === RUBRIC: load from cache or GCS (downloaded once per assignment batch) ===
+    if cache_key in _rubric_cache:
+        print(f"Rubric cache hit for {cache_key}")
+        rubric_text = _rubric_cache[cache_key]
+    else:
+        gcs_rubric_file = f"courses/{course_id}/assignments/{assignment_id}/rubric.txt"
+        tmp_rubric_file = f"/tmp/{course_id}_{assignment_id}_rubric.txt"
+        if not download_from_gcs(gcs_rubric_file, tmp_rubric_file):
+            return {"error": "Rubric not found in Google Cloud Storage."}
+        with open(tmp_rubric_file, 'r', encoding='utf-8') as f:
+            rubric_text = f.read()
+        os.remove(tmp_rubric_file)
+        _rubric_cache[cache_key] = rubric_text
+        print(f"Rubric downloaded and cached for {cache_key}")
 
-    # Download Rubric and Solution from GCS to /tmp
-    if not download_from_gcs(gcs_rubric_file, tmp_rubric_file):
-        return {"error": "Rubric not found in Google Cloud Storage."}
+    # === SOLUTION: load from cache or GCS (processed once, reused for all 30 students) ===
+    if cache_key in _solution_cache:
+        print(f"Solution cache hit for {cache_key}")
+        solution_parts = _solution_cache[cache_key]
+    else:
+        gcs_solution_file = f"courses/{course_id}/assignments/{assignment_id}/solution.pdf"
+        tmp_solution_file = f"/tmp/{course_id}_{assignment_id}_solution.pdf"
+        has_solution = download_from_gcs(gcs_solution_file, tmp_solution_file)
+        if has_solution:
+            solution_parts = build_submission_parts(tmp_solution_file)
+            os.remove(tmp_solution_file)
+        else:
+            solution_parts = []
+        _solution_cache[cache_key] = solution_parts
+        print(f"Solution processed and cached for {cache_key}")
 
-    # We don't error out if solution is missing, some assignments might not have one
-    has_solution = download_from_gcs(gcs_solution_file, tmp_solution_file)
-
-    with open(tmp_rubric_file, 'r', encoding='utf-8') as f:
-        rubric_text = f.read()
+    # === PAGE CAP: trim oversized submissions before any processing ===
+    submission_path = cap_pdf_pages(submission_path)
 
     # RAG: search course slides using student text (or rubric as fallback)
     search_query = extract_text_for_search(submission_path) or rubric_text
-    slides_context = find_relevant_slides(search_query[:500], index, text_metadata, embedder)
-
-    # === PAGE-LEVEL ROUTING: INSTRUCTOR SOLUTION ===
-    # build_submission_parts() extracts text from text pages (free) and
-    # only uploads image/blank pages to Vision API (paid). Page order preserved.
-    solution_parts = []
-    if has_solution:
-        solution_parts = build_submission_parts(tmp_solution_file)
+    slides_context = find_relevant_slides(search_query[:200], index, text_metadata, embedder)
 
     # === PAGE-LEVEL ROUTING: STUDENT SUBMISSION ===
+    # Text pages -> free extraction. Image/blank pages -> Vision API only for those pages.
     submission_parts = build_submission_parts(submission_path)
 
     if not submission_parts:
         return {"error": "Failed to process student submission"}
 
-    llm = get_llm(task="grading")  # Uses cheaper gemini-2.0-flash
+    llm = get_llm(task="grading")  # gemini-2.5-flash for best accuracy
     prompt = build_grading_prompt(rubric_text, slides_context)
 
     # Assemble the full content list: prompt + solution parts + submission parts
@@ -321,11 +365,6 @@ def grade_submission(
     result["assignment_id"] = assignment_id
     result["submission_file"] = os.path.basename(submission_path)
 
-    # Clean up the /tmp files to save server memory
-    os.remove(tmp_rubric_file)
-    if has_solution:
-        os.remove(tmp_solution_file)
-
     return result
 
 def get_presubmission_review(course_id: str, assignment_id: str, doc_text: str):
@@ -334,21 +373,22 @@ def get_presubmission_review(course_id: str, assignment_id: str, doc_text: str):
     if index is None:
         return {"error": f"No knowledge base found for course {course_id}"}
 
-    # Define paths
-    gcs_rubric_file = f"courses/{course_id}/assignments/{assignment_id}/rubric.txt"
-    tmp_rubric_file = f"/tmp/{course_id}_{assignment_id}_review_rubric.txt"
+    # Rubric: use cache if available (shared with grading cache)
+    cache_key = f"{course_id}_{assignment_id}"
+    if cache_key in _rubric_cache:
+        print(f"Rubric cache hit for {cache_key}")
+        rubric_text = _rubric_cache[cache_key]
+    else:
+        gcs_rubric_file = f"courses/{course_id}/assignments/{assignment_id}/rubric.txt"
+        tmp_rubric_file = f"/tmp/{course_id}_{assignment_id}_review_rubric.txt"
+        if not download_from_gcs(gcs_rubric_file, tmp_rubric_file):
+            return {"error": "Rubric not found in Google Cloud Storage."}
+        with open(tmp_rubric_file, 'r', encoding='utf-8') as f:
+            rubric_text = f.read()
+        os.remove(tmp_rubric_file)
+        _rubric_cache[cache_key] = rubric_text
 
-    # Download Rubric from GCS
-    if not download_from_gcs(gcs_rubric_file, tmp_rubric_file):
-        return {"error": "Rubric not found in Google Cloud Storage."}
-
-    with open(tmp_rubric_file, 'r', encoding='utf-8') as f:
-        rubric_text = f.read()
-
-    # Clean up /tmp
-    os.remove(tmp_rubric_file)
-
-    slides_context = find_relevant_slides(doc_text[:500], index, text_metadata, embedder)
+    slides_context = find_relevant_slides(doc_text[:200], index, text_metadata, embedder)
 
     llm = get_llm(task="review")  # Uses smarter gemini-2.5-flash for nuanced feedback
     prompt = build_feedback_prompt(doc_text, rubric_text, slides_context)

@@ -14,7 +14,7 @@ GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-2.0-flash')  # Transcription only — 2.0-flash is sufficient
 else:
     print("Warning: No GOOGLE_API_KEY found.")
     model = None
