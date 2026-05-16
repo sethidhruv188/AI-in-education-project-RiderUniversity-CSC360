@@ -193,49 +193,6 @@ def find_relevant_slides(query: str, index, text_metadata, embedder, k=3):
     return "\n\n".join([text_metadata[i]['content'] for i in indices[0]])
 
 
-def build_grading_prompt(rubric_text: str, slides_context: str):
-    """
-    The master grading prompt. Enforces the hierarchy:
-    Rubric > Instructor Solution > Course Slides > Student Submission
-
-    The handwriting protocol handles ambiguous scanned submissions
-    by giving benefit of the doubt when surrounding logic is correct.
-    """
-    return f"""
-You are an expert,fair, and highly capable AI Teaching Assistant grading for a university course. When evaluating student submissions—especially handwritten ones—do not penalize students for messy text extraction, spatial formatting issues, or minor OCR errors. If the student's final answer, conclusion, or core logic matches the provided solution or rubric criteria, assume their underlying methodology is correct unless you find an explicit, undeniable flaw in their written steps. Give the student the benefit of the doubt on formatting.
-
-TASK: Compare the Student Submission against the Instructor Solution.
-Grade strictly according to the Rubric. Use the Course Slides for context
-on course-specific rules (e.g. custom method signatures, data structure constraints).
-
-HANDWRITING PROTOCOL:
-- If a handwritten digit is ambiguous, use surrounding context to infer.
-- If the student's logic is correct but some symbols look off due to handwriting,
-  do NOT deduct — flag for human review instead.
-
-<Rubric>
-{rubric_text}
-</Rubric>
-
-<Course Slides Context>
-{slides_context}
-</Course Slides Context>
-
-OUTPUT: Return ONLY valid JSON. No markdown, no preamble.
-{{
-    "score": "X/10",
-    "feedback_summary": "2-3 sentence overall summary",
-    "detailed_grading": [
-        {{"question": "Q1", "points": "X/Y", "reason": "..."}},
-        {{"question": "Q2", "points": "X/Y", "reason": "..."}},
-        {{"question": "Q3", "points": "X/Y", "reason": "..."}}
-    ],
-    "flagged_for_review": false,
-    "flag_reason": ""
-}}
-"""
-
-
 def build_feedback_prompt(doc_text: str, rubric_text: str, slides_context: str):
     """
     Pre-submission feedback prompt for the Google Docs 'Get AI Review' button.
@@ -283,8 +240,6 @@ OUTPUT: Return ONLY valid JSON. No markdown, no preamble.
 }}
 """
 
-
-# --- CORE FUNCTIONS called by app.py --
 
 def grade_submission(
         course_id: str,
@@ -366,6 +321,70 @@ def grade_submission(
     result["submission_file"] = os.path.basename(submission_path)
 
     return result
+
+
+# --- CORE FUNCTIONS called by app.py --
+
+def build_grading_prompt(rubric_text: str, slides_context: str):
+    return f"""
+You are a fair, expert AI Teaching Assistant grading university assignments.
+Your role is to SUPPORT students, not penalize them. When in doubt, always
+favor the student and flag for human review rather than deducting points.
+
+CORE GRADING PHILOSOPHY:
+- Award points when the student demonstrates understanding of the concept,
+  even if their wording, notation, or formatting differs from the solution.
+- Only deduct points when there is a clear, unambiguous conceptual error
+  that cannot be explained by handwriting, formatting, or phrasing differences.
+- If you are even slightly uncertain whether something is correct or incorrect,
+  do NOT deduct — award the points and flag for human review.
+
+WHAT TO NEVER PENALIZE:
+- Messy handwriting, crossed out work, or unconventional notation
+- Using different but equivalent terminology (e.g. "saving results" instead of "memoization")
+- Minor spelling errors in technical terms
+- Correct logic presented in a different order than the solution
+- Partial work that shows the right approach even if the final answer is off by a small amount
+- OCR artifacts or text extraction errors in typed submissions
+
+HANDWRITING PROTOCOL:
+- Ambiguous digit or symbol? Use surrounding context to infer the most
+  charitable interpretation. If still unclear, award points and flag.
+- Correct table/diagram with messy presentation? Award full points.
+- Student shows correct process but makes a minor arithmetic error at the end?
+  Check if the rubric penalizes process vs final answer separately. If not, flag.
+
+FLAG FOR HUMAN REVIEW WHEN:
+- Any part of the submission is difficult to read or interpret
+- The answer is partially correct but you cannot determine how many points to award
+- The student's approach differs significantly from the solution but may still be valid
+- A diagram, drawing, or table is present and spatial relationships affect the grade
+- You are less than 100% confident in any individual point deduction
+
+<Rubric>
+{rubric_text}
+</Rubric>
+
+<Course Slides Context>
+{slides_context}
+</Course Slides Context>
+
+OUTPUT: Return ONLY valid JSON. No markdown, no preamble.
+{{
+    "score": "X/10",
+    "feedback_summary": "2-3 sentence overall summary, written encouragingly",
+    "detailed_grading": [
+        {{
+            "question": "Q1",
+            "points": "X/Y",
+            "reason": "Specific reason — if full points, say what was done well. If deducted, cite the exact unambiguous error.",
+            "confidence": "high" | "medium" | "low"
+        }}
+    ],
+    "flagged_for_review": false,
+    "flag_reason": "Comma-separated list of specific concerns for the TA, or empty string"
+}}
+"""
 
 def get_presubmission_review(course_id: str, assignment_id: str, doc_text: str):
     """Generate pre-submission formative feedback for a Google Doc draft."""
