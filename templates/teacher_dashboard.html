@@ -41,7 +41,7 @@
     <h2>AI Autograder - Batch Grading Portal</h2>
 
     <label>Select Course:</label>
-    <select id="courseSelect">
+    <select id="courseSelect" onchange="filterAssignments()">
         <option value="CSC130_Spring2026">CSC 130 (Spring 2026)</option>
         <option value="PHY212_Spring2026">PHY 212 (Physics II)</option>
         <option value="PHY110_Spring2026">PHY 110 (Physics I)</option>
@@ -49,16 +49,18 @@
 
     <label>Select Assignment:</label>
     <select id="assignmentSelect">
-        <option value="Module_5_Discussion">Module 5 Dynamic Programming</option>
-        <option value="Stack_Discussion">Stack Discussion</option>
-        <option value="Lab_1_Kinematics">Lab 1: Kinematics (PHY 110)</option>
-        <option value="Lab_3_Circuits">Lab 3: Circuits (PHY 212)</option>
+        <option value="Module_5_Discussion" data-course="CSC130_Spring2026">Module 5 Dynamic Programming</option>
+        <option value="Stack_Discussion" data-course="CSC130_Spring2026">Stack Discussion</option>
+
+        <option value="Lab_1_Kinematics" data-course="PHY110_Spring2026">Lab 1: Kinematics</option>
+
+        <option value="HW-1" data-course="PHY212_Spring2026">HW-1</option>
     </select>
 
     <label>Upload Student Submissions (Select multiple PDFs):</label>
     <input type="file" id="fileInput" multiple accept=".pdf">
 
-    <button class="btn-primary" onclick="startBatchGrading()">Grade All Submissions</button>
+    <button type="button" class="btn-primary" onclick="startBatchGrading()">Grade All Submissions</button>
 
     <h3>Live Grading Results</h3>
     <table id="resultsTable">
@@ -72,12 +74,40 @@
             </tr>
         </thead>
         <tbody>
-            </tbody>
+        </tbody>
     </table>
 </div>
 
 <script>
-    // Helper function to slide open the details row
+    // --- UI LOGIC: CASCADING DROPDOWNS ---
+    // Runs automatically when the page loads to set the initial state
+    document.addEventListener("DOMContentLoaded", filterAssignments);
+
+    function filterAssignments() {
+        const selectedCourse = document.getElementById("courseSelect").value;
+        const assignmentSelect = document.getElementById("assignmentSelect");
+        let firstMatchIndex = -1;
+
+        // Loop through all assignment options
+        for (let i = 0; i < assignmentSelect.options.length; i++) {
+            let option = assignmentSelect.options[i];
+
+            // If the option matches the selected course, show it
+            if (option.getAttribute("data-course") === selectedCourse) {
+                option.style.display = "";
+                if (firstMatchIndex === -1) firstMatchIndex = i; // Save the first valid option
+            } else {
+                option.style.display = "none"; // Hide mismatching ones
+            }
+        }
+
+        // Force the dropdown to select the first valid option for the new course
+        if (firstMatchIndex !== -1) {
+            assignmentSelect.selectedIndex = firstMatchIndex;
+        }
+    }
+
+    // --- GRADING LOGIC ---
     function toggleDetails(rowId) {
         const row = document.getElementById(rowId);
         if (row.style.display === "none" || row.style.display === "") {
@@ -90,7 +120,6 @@
     async function startBatchGrading() {
         const files = document.getElementById('fileInput').files;
 
-        // Grab elements to extract text for the warning pop-up
         const courseDropdown = document.getElementById('courseSelect');
         const assignmentDropdown = document.getElementById('assignmentSelect');
 
@@ -110,14 +139,12 @@
         const confirmationMessage = `Wait! Please confirm your selection:\n\nCourse: ${courseText}\nAssignment: ${assignmentText}\n\nDo you want to proceed and run the AI Autograder?`;
         if (!window.confirm(confirmationMessage)) {
             console.log("Grading cancelled by user.");
-            return; // Stops the function immediately
+            return;
         }
 
-        // Loop through files ONE BY ONE
         for (let i = 0; i < files.length; i++) {
             let file = files[i];
 
-            // 1. Create the Main Row
             let mainRow = tbody.insertRow();
             let fileCell = mainRow.insertCell(0);
             let statusCell = mainRow.insertCell(1);
@@ -138,35 +165,29 @@
                 let response = await fetch('/grade', { method: 'POST', body: formData });
                 let result = await response.json();
 
-                // Update Status & Score
                 statusCell.innerText = "Complete";
                 statusCell.className = "status-success";
                 scoreCell.innerHTML = `<strong>${result.score}</strong>`;
 
-                // Handle AI Flags
                 if (result.flagged_for_review) {
                     flagCell.innerHTML = `<span class="flagged">⚠️ Needs Review</span><br><small>${result.flag_reason}</small>`;
                 } else {
                     flagCell.innerHTML = `<span class="all-good">Clear</span>`;
                 }
 
-                // Add Toggle Button
                 let detailsId = `details-${Date.now()}-${i}`;
                 actionCell.innerHTML = `<button class="btn-toggle" onclick="toggleDetails('${detailsId}')">View Details</button>`;
 
-                // 2. Create the Hidden Details Row
                 let detailsRow = tbody.insertRow();
                 detailsRow.id = detailsId;
                 detailsRow.className = "details-row";
                 let detailsCell = detailsRow.insertCell(0);
-                detailsCell.colSpan = 5; // Stretch across all columns
+                detailsCell.colSpan = 5;
 
-                // Build the inner HTML from the JSON breakdown
                 let breakdownHTML = `<div class="details-box">`;
                 breakdownHTML += `<h4>Overall Summary</h4><p>${result.feedback_summary}</p>`;
                 breakdownHTML += `<h4>Detailed Rubric Breakdown</h4><ul>`;
 
-                // Loop through the "detailed_grading" array
                 if (result.detailed_grading) {
                     result.detailed_grading.forEach(q => {
                         breakdownHTML += `<li><strong>${q.question} (${q.points}):</strong> ${q.reason}</li>`;
