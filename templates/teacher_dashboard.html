@@ -43,12 +43,16 @@
     <label>Select Course:</label>
     <select id="courseSelect">
         <option value="CSC130_Spring2026">CSC 130 (Spring 2026)</option>
+        <option value="PHY212_Spring2026">PHY 212 (Physics II)</option>
+        <option value="PHY110_Spring2026">PHY 110 (Physics I)</option>
     </select>
 
     <label>Select Assignment:</label>
     <select id="assignmentSelect">
-        <option value="Stack_Discussion">Stack Discussion</option>
         <option value="Module_5_Discussion">Module 5 Dynamic Programming</option>
+        <option value="Stack_Discussion">Stack Discussion</option>
+        <option value="Lab_1_Kinematics">Lab 1: Kinematics (PHY 110)</option>
+        <option value="Lab_3_Circuits">Lab 3: Circuits (PHY 212)</option>
     </select>
 
     <label>Upload Student Submissions (Select multiple PDFs):</label>
@@ -85,13 +89,28 @@
 
     async function startBatchGrading() {
         const files = document.getElementById('fileInput').files;
-        const course = document.getElementById('courseSelect').value;
-        const assignment = document.getElementById('assignmentSelect').value;
+
+        // Grab elements to extract text for the warning pop-up
+        const courseDropdown = document.getElementById('courseSelect');
+        const assignmentDropdown = document.getElementById('assignmentSelect');
+
+        const course = courseDropdown.value;
+        const assignment = assignmentDropdown.value;
+
+        const courseText = courseDropdown.options[courseDropdown.selectedIndex].text;
+        const assignmentText = assignmentDropdown.options[assignmentDropdown.selectedIndex].text;
+
         const tbody = document.querySelector('#resultsTable tbody');
 
         if (files.length === 0) {
             alert("Please select at least one PDF.");
             return;
+        }
+
+        const confirmationMessage = `Wait! Please confirm your selection:\n\nCourse: ${courseText}\nAssignment: ${assignmentText}\n\nDo you want to proceed and run the AI Autograder?`;
+        if (!window.confirm(confirmationMessage)) {
+            console.log("Grading cancelled by user.");
+            return; // Stops the function immediately
         }
 
         // Loop through files ONE BY ONE
