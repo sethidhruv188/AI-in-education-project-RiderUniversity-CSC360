@@ -76,10 +76,6 @@ def build_kb():
         filename = secure_filename(f.filename)
         save_path = os.path.join(tmp_materials_dir, filename)
         f.save(save_path)
-
-        # 2. Upload raw slides to GCS for backup
-        gcs_slide_path = f"courses/{course_id}/assignments/{assignment_id}/materials/{filename}"
-        upload_to_gcs(save_path, gcs_slide_path)
         saved_files.append(filename)
 
     # 3. Pass the /tmp folder to the FAISS builder
