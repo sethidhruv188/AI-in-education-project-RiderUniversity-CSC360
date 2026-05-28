@@ -1,10 +1,171 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>$Title$</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>RCBC AI Autograder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-$END$
+
+  <header class="topbar">
+    <div class="topbar__logo">
+      <img src="/static/rcbc-logo.png" alt="RCBC Logo" class="rcbc-real-logo">
+      <div class="logo-text">
+        <span class="logo-text__school">Rowan College at Burlington County</span>
+        <span class="logo-text__product">AI Autograder</span>
+      </div>
+    </div>
+    <div class="topbar__center" id="breadcrumb"></div>
+    <div class="topbar__right">
+      <div class="avatar" title="Faculty Profile">FAC</div>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar__section-label">Main Menu</div>
+      <button class="nav-item nav-item--active" id="nav-dashboard" onclick="App.showDashboard()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        Dashboard
+      </button>
+
+      <div class="sidebar__divider"></div>
+      <div class="sidebar__section-label">My Courses</div>
+
+      <button class="nav-item" id="nav-PHY110_Spring2026" onclick="App.openCourse('PHY110_Spring2026')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(45 12 12)"></ellipse>
+          <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(-45 12 12)"></ellipse>
+        </svg>
+        PHY 110
+      </button>
+
+      <button class="nav-item" id="nav-PHY212_Spring2026" onclick="App.openCourse('PHY212_Spring2026')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(45 12 12)"></ellipse>
+          <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(-45 12 12)"></ellipse>
+        </svg>
+        PHY 212
+      </button>
+      <button class="nav-item" id="nav-CSC130_Spring2026" onclick="App.openCourse('CSC130_Spring2026')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        CSC 130
+      </button>
+    </aside>
+
+    <main class="main-content">
+
+      <section id="view-dashboard" class="view view--active">
+        <div class="page-header">
+          <h1 class="page-header__title">Faculty Dashboard</h1>
+          <p class="page-header__sub">Select a course to begin batch grading.</p>
+        </div>
+
+        <div class="course-cards">
+          <button class="course-card" onclick="App.openCourse('PHY110_Spring2026')">
+            <div class="course-card__code">PHY 110</div>
+            <div class="course-card__name">Physics I — Mechanics</div>
+            <div class="course-card__footer"><span>Open Course &rarr;</span></div>
+          </button>
+          <button class="course-card" onclick="App.openCourse('PHY212_Spring2026')">
+            <div class="course-card__code">PHY 212</div>
+            <div class="course-card__name">Physics II</div>
+            <div class="course-card__footer"><span>Open Course &rarr;</span></div>
+          </button>
+          <button class="course-card" onclick="App.openCourse('CSC130_Spring2026')">
+            <div class="course-card__code">CSC 130</div>
+            <div class="course-card__name">Data Structures</div>
+            <div class="course-card__footer"><span>Open Course &rarr;</span></div>
+          </button>
+        </div>
+      </section>
+
+      <section id="view-course" class="view" style="display:none">
+
+        <div class="course-hero">
+          <div>
+            <div class="course-hero__code" id="hero-course-code"></div>
+            <div class="course-hero__name" id="hero-course-name"></div>
+          </div>
+        </div>
+
+        <div class="course-layout">
+          <div class="course-layout__left">
+
+            <div class="section-card">
+              <div class="section-card__title">1. Select Assignment</div>
+
+              <div class="search-select">
+                <input type="text" id="assignment-search" class="search-select__input" placeholder="Search assignments (e.g., Chapter 2)..." autocomplete="off">
+                <svg class="search-select__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <ul class="search-select__dropdown" id="assignment-dropdown-list"></ul>
+              </div>
+            </div>
+
+            <div class="section-card">
+              <div class="results-header">
+                <div class="section-card__title" style="margin-bottom:0;">Live Grading Results</div>
+                <div id="export-btn-wrap"></div>
+              </div>
+
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Student File</th>
+                      <th>Status</th>
+                      <th>Score</th>
+                      <th>Flags</th>
+                      <th>Feedback</th>
+                    </tr>
+                  </thead>
+                  <tbody id="results-tbody">
+                    <tr><td colspan="5" class="empty-state">No submissions graded yet.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="course-layout__right">
+            <div class="section-card">
+              <div class="section-card__title">2. Upload Submissions</div>
+
+              <div class="upload-zone" id="upload-zone">
+                <input type="file" id="file-input" multiple accept=".pdf">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <div class="upload-zone__title">Drop PDFs here</div>
+                <div class="upload-zone__sub">or click to browse</div>
+              </div>
+
+              <div class="progress-wrap" id="progress-wrap" style="display:none">
+                <div class="progress-meta">
+                  <span id="progress-label">Grading...</span>
+                  <span id="progress-pct">0%</span>
+                </div>
+                <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+              </div>
+
+              <button class="grade-btn" id="grade-btn" onclick="App.startGrading()" disabled>
+                Run AI Autograder
+              </button>
+
+              <div class="file-list" id="file-list"></div>
+
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
 </body>
 </html>
