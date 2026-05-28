@@ -302,7 +302,9 @@ def get_results():
 @app.route('/teacher', methods=['GET'])
 def teacher_dashboard():
     # This simply loads the HTML page when they visit the URL
-    return render_template('teacher_dashboard.html')
+    return render_template('index.html')
+
+
 
 # Run with: python app.py (local dev) or gunicorn app:app --bind 0.0.0.0:8080 (production)
 port = int(os.environ.get("PORT", 5000))
