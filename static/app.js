@@ -30,6 +30,10 @@ const COURSES = {
       { id: 'Module_5_Discussion', title: 'Module 5 Dynamic Programming' }
     ],
   }
+    'SST100_Summer2026': {
+    code: 'SST 100', name: 'Principles of Sustainability',
+    assignments: [{ id: 'assignment_1', title: 'Assignment 1' }],
+  }
 };
 
 const state = {
