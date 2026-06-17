@@ -250,10 +250,14 @@ def grade_submission(
     Grade a single student submission for a given course and assignment using GCS.
     (Note: submission_path is already a /tmp path passed from app.py)
     """
-    # Load this course's isolated knowledge base from GCS
-    index, text_metadata, embedder = load_knowledge_base(course_id, assignment_id)
-    if index is None:
-        return {"error": f"No knowledge base found for {course_id} - {assignment_id}."}
+    # Load this course's isolated knowledge base from GCS safely
+    try:
+        index, text_metadata, embedder = load_knowledge_base(course_id, assignment_id)
+    except Exception as e:
+        print(f"Notice: KB folder lookup failed ({e}). Proceeding without lecture slides.")
+        index, text_metadata, embedder = None, None, None
+
+    # Notice: If index is None, we DO NOT exit. We proceed directly using rubric + solution.
 
     cache_key = f"{course_id}_{assignment_id}"
 
@@ -291,9 +295,13 @@ def grade_submission(
     # === PAGE CAP: trim oversized submissions before any processing ===
     submission_path = cap_pdf_pages(submission_path)
 
-    # RAG: search course slides using student text (or rubric as fallback)
-    search_query = extract_text_for_search(submission_path) or rubric_text
-    slides_context = find_relevant_slides(search_query[:200], index, text_metadata, embedder)
+    # RAG: search course slides ONLY if the knowledge base index exists
+    if index is not None and text_metadata is not None and embedder is not None:
+        search_query = extract_text_for_search(submission_path) or rubric_text
+        slides_context = find_relevant_slides(search_query[:200], index, text_metadata, embedder)
+    else:
+        # Pass an explicit strict instruction string if the KB slides are missing
+        slides_context = "No lecture slides available. Grade strictly on the Rubric and Instructor Solution only."
 
     # === PAGE-LEVEL ROUTING: STUDENT SUBMISSION ===
     # Text pages -> free extraction. Image/blank pages -> Vision API only for those pages.
@@ -332,12 +340,10 @@ Your role is to SUPPORT students, not penalize them. When in doubt, always
 favor the student and flag for human review rather than deducting points.
 
 CORE GRADING PHILOSOPHY:
-- Award points when the student demonstrates understanding of the concept,
-  even if their wording, notation, or formatting differs from the solution.
-- Only deduct points when there is a clear, unambiguous conceptual error
-  that cannot be explained by handwriting, formatting, or phrasing differences.
-- If you are even slightly uncertain whether something is correct or incorrect,
-  do NOT deduct — award the points and flag for human review.
+- Award points when the student demonstrates understanding of the concept,even if their wording, notation, or formatting differs from the solution.
+- Only deduct points when there is a clear, unambiguous conceptual error that cannot be explained by handwriting, formatting, or phrasing differences.
+- If you are even slightly uncertain whether something is correct or incorrect, do NOT deduct — award the points and flag for human review.
+- STRICT DATA SOURCE CONSTRAINT: If the <Course Slides Context> section states that no lecture slides are available, you must evaluate the student's work SOLELY based on the provided <Rubric> and <Instructor Solution>. Do not use outside knowledge or external grading standards.
 
 WHAT TO NEVER PENALIZE:
 - Messy handwriting, crossed out work, or unconventional notation
