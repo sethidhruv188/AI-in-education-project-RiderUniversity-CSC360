@@ -33,9 +33,9 @@ const COURSES = {
     'SST100_Summer2026': {
     code: 'SST 100', name: 'Principles of Sustainability',
     assignments: [
-    { id: 'assignment_1', title: 'Assignment 1' }
-    { id: 'assignment_2', title: 'Assignment 2' }
-    { id: 'assignment_3', title: 'Assignment 3' }
+    { id: 'assignment_1', title: 'Assignment 1' },
+    { id: 'assignment_2', title: 'Assignment 2' },
+    { id: 'assignment_3', title: 'Assignment 3' },
     { id: 'assignment_4', title: 'Assignment 4' }
     ],
   }
